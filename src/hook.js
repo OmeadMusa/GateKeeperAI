@@ -160,7 +160,7 @@ async function main() {
   debugLog(repoRoot, `nonInteractive=${nonInteractive}`);
   let userAction;
   try {
-    userAction = await prompt(reviewResult, { nonInteractive });
+    userAction = await prompt(reviewResult, { nonInteractive, repoRoot });
   } catch (err) {
     debugLog(repoRoot, `EXIT: UI error — ${err.message}`);
     console.error('Gatekeeper: UI error:', err.message);
@@ -217,7 +217,7 @@ function writeCache(repoRoot, diffHash, reviewResult) {
     if (existsSync(cachePath)) {
       try { cache = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { /* start fresh */ }
     }
-    cache[diffHash] = { status: reviewResult.status, summary: reviewResult.summary, timestamp: Date.now() };
+    cache[diffHash] = { status: reviewResult.status, summary: reviewResult.summary, issues: reviewResult.issues ?? [], timestamp: Date.now() };
     // Prune entries older than TTL to keep the file small
     for (const [key, entry] of Object.entries(cache)) {
       if (Date.now() - entry.timestamp > CACHE_TTL_MS) delete cache[key];

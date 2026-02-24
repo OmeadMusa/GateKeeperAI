@@ -7,8 +7,9 @@
  */
 
 import { createInterface } from 'readline';
-import { createReadStream } from 'fs';
+import { createReadStream, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { openSync } from 'fs';
+import { join } from 'path';
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, CYAN, bold, dim, red, green, yellow, cyan } from './colors.js';
 
 /**
@@ -31,9 +32,10 @@ function openTtyStream() {
  * @param {object} reviewResult - The structured result from gatekeeper.js
  * @param {object} [options]
  * @param {boolean} [options.nonInteractive] - No TTY available; auto-decide instead of prompting
+ * @param {string} [options.repoRoot] - Repo root path, used to write LAST_REVIEW.md
  * @returns {Promise<'approve'|'fix'|'override'>}
  */
-export async function prompt(reviewResult, { nonInteractive = false } = {}) {
+export async function prompt(reviewResult, { nonInteractive = false, repoRoot = null } = {}) {
   const { status, issues, summary } = reviewResult;
 
   process.stdout.write('\n');
@@ -43,38 +45,52 @@ export async function prompt(reviewResult, { nonInteractive = false } = {}) {
   }
 
   if (nonInteractive) {
-    return handleNonInteractive(status, issues, summary);
+    return handleNonInteractive(status, issues ?? [], summary, repoRoot);
   }
 
   if (status === 'yellow') {
-    return handleYellow(issues, summary);
+    return handleYellow(issues ?? [], summary);
   }
 
   // red
-  return handleRed(issues, summary);
+  return handleRed(issues ?? [], summary);
 }
 
 /**
- * Non-interactive mode (no /dev/tty — running inside an agent or CI).
+ * Non-interactive mode (no /dev/tty — running inside a GUI client or CI).
  *
- * Both yellow and red block the push. Blocking is what forces the agent
- * (e.g. Claude Code) to surface the issue to the user in its current
- * response — a successful exit 0 would let it move on silently.
+ * Both yellow and red block the push. We write a LAST_REVIEW.md file to
+ * .gatekeeper/ so the user has a persistent, readable record of what
+ * happened and exactly what to do next — critical when the hook output
+ * is buried in a GUI client's output panel.
  *
  * Override paths:
  *   GATEKEEPER_ALLOW_WARNINGS=1  bypass yellow warnings
  *   GATEKEEPER_OVERRIDE=1        bypass red critical issues
  */
-async function handleNonInteractive(status, issues, summary) {
-  if (status === 'yellow') {
-    const count = issues.length;
-    console.log(bold(yellow(`🟡 Gatekeeper: ${count} warning${count === 1 ? '' : 's'} found — push blocked`)));
+async function handleNonInteractive(status, issues, summary, repoRoot) {
+  const isYellow = status === 'yellow';
+  const emoji = isYellow ? '🟡' : '🔴';
+  const label = isYellow ? 'warnings' : 'CRITICAL issues';
+  const count = issues.length;
+
+  // Always write a LAST_REVIEW.md so the user can find the details
+  if (repoRoot) {
+    writeLastReview(repoRoot, status, issues, summary);
+  }
+
+  if (isYellow) {
+    console.log(bold(yellow(`${emoji} Gatekeeper: ${count} warning${count === 1 ? '' : 's'} found — push blocked`)));
     for (const issue of issues) {
       console.log(`   ⚠️  ${issue.plain_english}`);
-      console.log(`   Fix: ${dim(issue.fix_prompt)}`);
     }
+    console.log('');
     console.log(dim(`   ${summary}`));
     console.log('');
+    if (repoRoot) {
+      console.log(`   📋 Full details + fix instructions: .gatekeeper/LAST_REVIEW.md`);
+      console.log('');
+    }
     console.log(dim('   To push anyway: GATEKEEPER_ALLOW_WARNINGS=1 git push'));
     console.log('');
 
@@ -87,14 +103,17 @@ async function handleNonInteractive(status, issues, summary) {
   }
 
   // red
-  const count = issues.length;
-  console.log(bold(red(`🔴 Gatekeeper: CRITICAL issue${count === 1 ? '' : 's'} found — push blocked`)));
+  console.log(bold(red(`${emoji} Gatekeeper: ${count} CRITICAL issue${count === 1 ? '' : 's'} found — push blocked`)));
   for (const issue of issues.filter((i) => i.severity === 'critical')) {
     console.log(`   🚨 ${issue.plain_english}`);
-    console.log(`   Fix: ${dim(issue.fix_prompt)}`);
   }
+  console.log('');
   console.log(dim(`   ${summary}`));
   console.log('');
+  if (repoRoot) {
+    console.log(`   📋 Full details + fix instructions: .gatekeeper/LAST_REVIEW.md`);
+    console.log('');
+  }
   console.log(dim('   To override: GATEKEEPER_OVERRIDE=1 git push'));
   console.log('');
 
@@ -104,6 +123,56 @@ async function handleNonInteractive(status, issues, summary) {
   }
 
   return 'fix';
+}
+
+/**
+ * Write a human-readable review report to .gatekeeper/LAST_REVIEW.md.
+ * This is the primary way GUI users (VSCode, etc.) find out what happened.
+ */
+function writeLastReview(repoRoot, status, issues, summary) {
+  try {
+    const dir = join(repoRoot, '.gatekeeper');
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+    const ts = new Date().toLocaleString();
+    const emoji = status === 'yellow' ? '🟡' : '🔴';
+    const heading = status === 'yellow' ? 'Warnings — push blocked' : 'CRITICAL issues — push blocked';
+
+    const lines = [
+      `# ${emoji} Gatekeeper Review`,
+      `**${heading}**  ·  ${ts}`,
+      '',
+      `## Summary`,
+      summary,
+      '',
+      `## Issues`,
+      '',
+    ];
+
+    for (let i = 0; i < issues.length; i++) {
+      const issue = issues[i];
+      const sev = issue.severity === 'critical' ? '🚨 CRITICAL' : '⚠️  Warning';
+      lines.push(`### ${i + 1}. ${sev}`);
+      lines.push(issue.plain_english);
+      lines.push('');
+      lines.push('**How to fix:**');
+      lines.push(`> ${issue.fix_prompt}`);
+      lines.push('');
+    }
+
+    lines.push('---');
+    lines.push('');
+    if (status === 'yellow') {
+      lines.push('To push anyway (bypass warnings): `GATEKEEPER_ALLOW_WARNINGS=1 git push`');
+    } else {
+      lines.push('To override (bypass critical issues): `GATEKEEPER_OVERRIDE=1 git push`');
+    }
+    lines.push('');
+
+    writeFileSync(join(dir, 'LAST_REVIEW.md'), lines.join('\n'), 'utf8');
+  } catch {
+    // Never block a push due to file write failure
+  }
 }
 
 /**
