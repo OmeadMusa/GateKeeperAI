@@ -23,6 +23,9 @@ switch (command) {
   case 'init':
     runInit().catch(fatalError);
     break;
+  case 'scan':
+    runScan().catch(fatalError);
+    break;
   case 'stats':
     runStats().catch(fatalError);
     break;
@@ -95,6 +98,7 @@ async function setupApiKey(repoRoot) {
   }
 
   // Prompt for key
+  console.log(dim('  Get yours at: https://console.anthropic.com/settings/keys'));
   process.stdout.write('Enter your Anthropic API key (sk-ant-...): ');
   const apiKey = await readLine(true);
 
@@ -242,6 +246,45 @@ exit $?
 `;
 }
 
+// ─── scan ────────────────────────────────────────────────────────────────────
+
+async function runScan() {
+  const repoRoot = getRepoRoot();
+  if (!repoRoot) {
+    console.error(red('Error: Not inside a git repository.'));
+    process.exit(1);
+  }
+
+  const envPath = join(repoRoot, '.env');
+  let apiKey = null;
+  if (existsSync(envPath)) {
+    const content = readFileSync(envPath, 'utf8');
+    const match = content.match(/^ANTHROPIC_API_KEY\s*=\s*(.+)$/m);
+    if (match) apiKey = match[1].replace(/^['"]|['"]$/g, '').trim();
+  }
+  if (!apiKey) {
+    console.error(red('Error: No ANTHROPIC_API_KEY found in .env. Run `npx gatekeeper-ai init` first.'));
+    process.exit(1);
+  }
+
+  const destPath = join(repoRoot, 'GATEKEEPER.md');
+  process.stdout.write('Scanning repo to regenerate GATEKEEPER.md...');
+
+  let content;
+  try {
+    const { scanRepo } = await import(join(PKG_ROOT, 'src', 'scanner.js'));
+    content = await scanRepo({ repoRoot, apiKey });
+    process.stdout.write(' done\n');
+  } catch (err) {
+    process.stdout.write(' failed\n');
+    console.error(red(`Error: ${err.message}`));
+    process.exit(1);
+  }
+
+  writeFileSync(destPath, content, 'utf8');
+  console.log(`${green('✓')} GATEKEEPER.md regenerated`);
+}
+
 // ─── stats ───────────────────────────────────────────────────────────────────
 
 async function runStats() {
@@ -354,6 +397,7 @@ function printUsage() {
   console.log('');
   console.log('Usage:');
   console.log(`  ${cyan('npx gatekeeper-ai init')}    Install Gatekeeper in the current git repo`);
+  console.log(`  ${cyan('npx gatekeeper-ai scan')}    Regenerate GATEKEEPER.md by rescanning the repo`);
   console.log(`  ${cyan('npx gatekeeper-ai stats')}   Show review history for this repo`);
   console.log('');
 }
