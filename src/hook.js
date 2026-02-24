@@ -20,7 +20,6 @@ import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { createInterface } from 'readline';
 
 // Resolve the gatekeeper-ai package root so we can import modules from it.
 // When installed via npm, __dirname is inside node_modules/gatekeeper-ai/src/.
@@ -40,8 +39,9 @@ async function main() {
     process.exit(0);
   }
 
-  // Read push info from stdin (git provides this)
-  const pushInfo = await readStdin();
+  // Read push info from env var (set by the shell hook, which captured stdin
+  // before reopening /dev/tty so the terminal UI can show interactive prompts).
+  const pushInfo = process.env.GATEKEEPER_PUSH_DATA || '';
 
   // Parse the ranges of commits being pushed
   const commitRange = parsePushInfo(pushInfo, repoRoot);
@@ -155,18 +155,6 @@ function loadEnv(repoRoot) {
   } catch {
     // Silently ignore unreadable .env
   }
-}
-
-/**
- * Read all of stdin asynchronously.
- */
-function readStdin() {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin });
-    const lines = [];
-    rl.on('line', (line) => lines.push(line));
-    rl.on('close', () => resolve(lines.join('\n')));
-  });
 }
 
 /**
