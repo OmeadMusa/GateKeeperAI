@@ -17,7 +17,7 @@
  */
 
 import { execSync } from 'child_process';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, openSync, closeSync } from 'fs';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -92,10 +92,9 @@ async function main() {
     process.exit(0);
   }
 
-  // Render terminal UI and get user decision.
-  // In non-interactive mode (no /dev/tty), print the result but don't prompt —
-  // allow yellow, block red so critical issues still surface.
-  const nonInteractive = !!process.env.GATEKEEPER_NON_INTERACTIVE;
+  // Detect whether we have an interactive terminal by trying to open /dev/tty.
+  // This is more reliable than checking env vars set by the shell.
+  const nonInteractive = !canOpenTty();
   let userAction;
   try {
     userAction = await prompt(reviewResult, { nonInteractive });
@@ -227,6 +226,22 @@ function findPackageRoot(startDir) {
   }
   // Fallback: assume src/../ is the package root
   return resolve(startDir, '..');
+}
+
+/**
+ * Check whether /dev/tty is available for interactive input.
+ * More reliable than checking shell env vars or process.stdin.isTTY,
+ * because git hooks have stdin consumed by push data.
+ */
+function canOpenTty() {
+  if (process.platform === 'win32') return false;
+  try {
+    const fd = openSync('/dev/tty', 'r+');
+    closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 main().catch((err) => {

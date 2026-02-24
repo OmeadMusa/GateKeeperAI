@@ -7,7 +7,23 @@
  */
 
 import { createInterface } from 'readline';
+import { createReadStream } from 'fs';
+import { openSync } from 'fs';
 import { RESET, BOLD, DIM, RED, GREEN, YELLOW, CYAN, bold, dim, red, green, yellow, cyan } from './colors.js';
+
+/**
+ * Open /dev/tty as a readable stream for interactive input.
+ * Returns null if unavailable (non-interactive environment).
+ */
+function openTtyStream() {
+  if (process.platform === 'win32') return null;
+  try {
+    const fd = openSync('/dev/tty', 'r+');
+    return createReadStream(null, { fd, autoClose: true });
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Render the review result and collect the user's decision.
@@ -250,37 +266,37 @@ async function copyToClipboard(text) {
 }
 
 /**
- * Read a single keypress from stdin, normalised to lowercase.
+ * Read a single keypress from /dev/tty, normalised to lowercase.
  * Accepts only keys in the allowed set.
+ * Uses /dev/tty directly so it works even when process.stdin is a git pipe.
  */
 async function readChoice(allowed, defaultKey = null) {
   return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const ttyStream = openTtyStream();
+    const inputStream = ttyStream || process.stdin;
 
-    // Show prompt
+    const rl = createInterface({ input: inputStream, output: process.stdout });
     process.stdout.write(`Choice [${allowed.join('/').toUpperCase()}]${defaultKey ? ` (default: ${defaultKey.toUpperCase()})` : ''}: `);
 
-    // Attempt raw mode for single-keypress UX
-    if (process.stdin.setRawMode) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-      process.stdin.setEncoding('utf8');
+    // Raw mode: single keypress UX (works when the stream is a real tty)
+    if (inputStream.setRawMode) {
+      inputStream.setRawMode(true);
+      inputStream.resume();
+      inputStream.setEncoding('utf8');
 
       const onData = (key) => {
-        // Ctrl+C
-        if (key === '\u0003') {
+        if (key === '\u0003') { // Ctrl+C
           process.stdout.write('\n');
-          process.stdin.setRawMode(false);
-          process.stdin.removeListener('data', onData);
+          inputStream.setRawMode(false);
+          inputStream.removeListener('data', onData);
           rl.close();
           process.exit(1);
         }
 
-        // Enter/return: use default
         if ((key === '\r' || key === '\n') && defaultKey) {
           process.stdout.write(defaultKey.toUpperCase() + '\n');
-          process.stdin.setRawMode(false);
-          process.stdin.removeListener('data', onData);
+          inputStream.setRawMode(false);
+          inputStream.removeListener('data', onData);
           rl.close();
           resolve(defaultKey);
           return;
@@ -289,15 +305,14 @@ async function readChoice(allowed, defaultKey = null) {
         const lower = key.toLowerCase();
         if (allowed.includes(lower)) {
           process.stdout.write(key.toUpperCase() + '\n');
-          process.stdin.setRawMode(false);
-          process.stdin.removeListener('data', onData);
+          inputStream.setRawMode(false);
+          inputStream.removeListener('data', onData);
           rl.close();
           resolve(lower);
         }
-        // Ignore other keys
       };
 
-      process.stdin.on('data', onData);
+      inputStream.on('data', onData);
     } else {
       // Fallback: line-based input
       rl.on('line', (line) => {
@@ -317,11 +332,13 @@ async function readChoice(allowed, defaultKey = null) {
 }
 
 /**
- * Read a full line from stdin.
+ * Read a full line from /dev/tty.
  */
 async function readLine() {
   return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const ttyStream = openTtyStream();
+    const inputStream = ttyStream || process.stdin;
+    const rl = createInterface({ input: inputStream, output: process.stdout });
     rl.on('line', (line) => {
       rl.close();
       resolve(line.trim());
