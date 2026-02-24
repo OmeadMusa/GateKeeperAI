@@ -17,13 +17,28 @@
  */
 
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync, appendFileSync } from 'fs';
 import { createHash } from 'crypto';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 // Skip review if fewer than this many changed lines (trivial pushes)
 const TRIVIAL_LINE_THRESHOLD = 20;
+
+// Written at module load time so we always know the hook ran, even if it exits silently
+let _debugLogPath = null;
+
+function debugLog(repoRoot, message) {
+  try {
+    const dir = join(repoRoot, '.gatekeeper');
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    _debugLogPath = join(dir, 'hook-debug.log');
+    const ts = new Date().toISOString();
+    appendFileSync(_debugLogPath, `[${ts}] ${message}\n`, 'utf8');
+  } catch {
+    // debug logging must never block a push
+  }
+}
 
 // Cache TTL: don't re-review the same diff within this window
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -39,10 +54,12 @@ async function main() {
   const repoRoot = getRepoRoot();
   loadEnv(repoRoot);
 
+  debugLog(repoRoot, `hook started | pid=${process.pid} | cwd=${repoRoot}`);
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
+    debugLog(repoRoot, 'EXIT: no API key — failing open');
     console.error('Gatekeeper: ANTHROPIC_API_KEY not set. Run `npx gatekeeper-ai init` to configure.');
-    // Do not block push if API key is missing — fail open
     process.exit(0);
   }
 
@@ -51,11 +68,15 @@ async function main() {
   // GUI clients (VSCode, Tower, etc.) often pass empty stdin, so we fall back
   // to inferring the commit range directly from git when pushInfo is absent.
   const pushInfo = process.env.GATEKEEPER_PUSH_DATA || '';
+  debugLog(repoRoot, `pushInfo from stdin: ${pushInfo ? JSON.stringify(pushInfo.slice(0, 200)) : '(empty)'}`);
 
   // Parse the ranges of commits being pushed
-  const commitRange = parsePushInfo(pushInfo, repoRoot) || inferCommitRange(repoRoot);
+  const parsedRange = parsePushInfo(pushInfo, repoRoot);
+  const commitRange = parsedRange || inferCommitRange(repoRoot);
+  debugLog(repoRoot, `parsedRange=${parsedRange} | inferredRange=${parsedRange ? 'n/a' : commitRange} | final=${commitRange}`);
+
   if (!commitRange) {
-    // Truly nothing to push (e.g. tag-only, already up-to-date)
+    debugLog(repoRoot, 'EXIT: no commit range — nothing to push (tag-only or already up-to-date)');
     process.exit(0);
   }
 
@@ -68,19 +89,22 @@ async function main() {
       maxBuffer: 10 * 1024 * 1024, // 10MB
     });
   } catch (err) {
+    debugLog(repoRoot, `EXIT: git diff failed — ${err.message}`);
     console.error('Gatekeeper: Failed to get diff:', err.message);
     process.exit(0); // fail open
   }
 
   if (!diff.trim()) {
-    // Empty diff — nothing to review
+    debugLog(repoRoot, 'EXIT: empty diff — no code changes');
     console.log('✅ Gatekeeper: No code changes detected — pushing');
     process.exit(0);
   }
 
   // Skip trivial pushes (below line threshold)
   const changedLines = diff.split('\n').filter((l) => l.startsWith('+') || l.startsWith('-')).length;
+  debugLog(repoRoot, `changedLines=${changedLines} | threshold=${TRIVIAL_LINE_THRESHOLD}`);
   if (changedLines < TRIVIAL_LINE_THRESHOLD) {
+    debugLog(repoRoot, 'EXIT: trivial change — skipping review');
     console.log(`✅ Gatekeeper: Trivial change (${changedLines} lines) — skipping review`);
     process.exit(0);
   }
@@ -88,6 +112,7 @@ async function main() {
   // Check diff hash cache to avoid re-reviewing identical diffs
   const diffHash = createHash('sha256').update(diff).digest('hex');
   const cachedResult = readCache(repoRoot, diffHash);
+  debugLog(repoRoot, `diffHash=${diffHash.slice(0, 16)}… | cached=${cachedResult ? cachedResult.status : 'none'}`);
 
   // Read optional user request from GATEKEEPER_REQUEST env var
   // (Claude Code or the user can set this before pushing)
@@ -104,37 +129,45 @@ async function main() {
 
   if (cachedResult && cachedResult.status === 'green') {
     // Green cached result: auto-pass without re-reviewing or showing UI
+    debugLog(repoRoot, 'EXIT: green cache hit — auto-passing');
     console.log(`\n✅ Gatekeeper: Same diff reviewed recently — ${cachedResult.summary}`);
     process.exit(0);
   } else if (cachedResult) {
     // Non-green cached result: skip the API call but still show the UI
     // so the user must acknowledge the issue before the push goes through.
+    debugLog(repoRoot, `cache hit (${cachedResult.status}) — replaying through UI`);
     console.log('\nGatekeeper: Replaying cached review result...');
     reviewResult = cachedResult;
   } else {
     // Fresh review
+    debugLog(repoRoot, 'no cache — calling review API');
     console.log('\nGatekeeper: Reviewing your changes...');
     try {
       const repoContext = await buildContext({ repoRoot });
       reviewResult = await review({ diff, repoContext, userRequest, apiKey });
+      debugLog(repoRoot, `review result: ${reviewResult.status} | issues=${reviewResult.issues?.length ?? 0}`);
       writeCache(repoRoot, diffHash, reviewResult);
     } catch (err) {
+      debugLog(repoRoot, `EXIT: review API failed — ${err.message}`);
       console.error('Gatekeeper: Review failed:', err.message);
-      // Fail open — don't block the push if Gatekeeper itself errors
-      process.exit(0);
+      process.exit(0); // fail open
     }
   }
 
   // Detect whether we have an interactive terminal by trying to open /dev/tty.
   // This is more reliable than checking env vars set by the shell.
   const nonInteractive = !canOpenTty();
+  debugLog(repoRoot, `nonInteractive=${nonInteractive}`);
   let userAction;
   try {
     userAction = await prompt(reviewResult, { nonInteractive });
   } catch (err) {
+    debugLog(repoRoot, `EXIT: UI error — ${err.message}`);
     console.error('Gatekeeper: UI error:', err.message);
     process.exit(0); // fail open
   }
+
+  debugLog(repoRoot, `userAction=${userAction}`);
 
   // Log the outcome
   try {
@@ -145,11 +178,13 @@ async function main() {
 
   // Exit code determines whether git allows the push
   if (userAction === 'fix') {
+    debugLog(repoRoot, 'EXIT 1: user chose fix — blocking push');
     console.log('\nGatekeeper: Push cancelled. Fix the issue and try again.\n');
     process.exit(1); // block push
   }
 
   // 'approve' or 'override' — allow the push
+  debugLog(repoRoot, `EXIT 0: user action=${userAction} — allowing push`);
   process.exit(0);
 }
 
@@ -281,47 +316,69 @@ function parsePushInfo(pushInfo, repoRoot) {
  * Fallback commit range inference for when stdin push data is unavailable
  * (e.g. GUI clients like VSCode, Tower, Fork that don't pipe stdin to hooks).
  *
- * Strategy: find all local commits that haven't reached any remote tracking
- * branch, and diff from the oldest of those to HEAD.
+ * Uses the reflog to find what the remote tracking branch pointed to *before*
+ * this push — that's the reliable boundary regardless of timing. Falls back
+ * through progressively simpler strategies.
  */
 function inferCommitRange(repoRoot) {
-  try {
-    // Get all remote tracking refs so we can find the boundary
-    const remoteHeads = execSync('git for-each-ref --format="%(objectname)" refs/remotes', {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim().split('\n').filter(Boolean);
-
-    if (remoteHeads.length === 0) {
-      // No remotes at all — diff the last commit only
-      return 'HEAD~1..HEAD';
-    }
-
-    // Find commits reachable from HEAD but not from any remote tracking branch
-    const excludes = remoteHeads.map((sha) => `^${sha}`).join(' ');
-    const unpushed = execSync(`git log --format="%H" HEAD ${excludes}`, {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim().split('\n').filter(Boolean);
-
-    if (unpushed.length === 0) {
-      // Everything is already on a remote — nothing to review
-      return null;
-    }
-
-    // Diff from just before the oldest unpushed commit to HEAD
-    const oldest = unpushed[unpushed.length - 1];
-    return `${oldest}~1..HEAD`;
-  } catch {
-    // Last resort: just review HEAD
+  // Strategy 1: use the reflog of the remote tracking branch.
+  // origin/main@{1} is where origin/main was before the most recent update,
+  // which (for a push) is the last-known remote state before our commits.
+  const trackingBranches = ['origin/main', 'origin/master'];
+  for (const branch of trackingBranches) {
     try {
-      execSync('git rev-parse HEAD~1', { cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] });
-      return 'HEAD~1..HEAD';
+      const prev = execSync(`git rev-parse "${branch}@{1}"`, {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      const head = execSync('git rev-parse HEAD', {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (prev && prev !== head) {
+        return `${prev}..${head}`;
+      }
     } catch {
-      return null;
+      // branch doesn't exist, try next
     }
+  }
+
+  // Strategy 2: find the merge-base between HEAD and any remote tracking ref,
+  // then diff from there. Works for new branches pushed for the first time.
+  try {
+    const remoteRefs = execSync('git for-each-ref --format="%(refname:short)" refs/remotes/origin', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim().split('\n').filter(Boolean);
+
+    for (const ref of remoteRefs) {
+      try {
+        const base = execSync(`git merge-base HEAD ${ref}`, {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        const head = execSync('git rev-parse HEAD', {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        if (base && base !== head) {
+          return `${base}..${head}`;
+        }
+      } catch { /* try next */ }
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 3: last resort — diff just the most recent commit
+  try {
+    execSync('git rev-parse HEAD~1', { cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] });
+    return 'HEAD~1..HEAD';
+  } catch {
+    return null;
   }
 }
 
@@ -366,6 +423,11 @@ function canOpenTty() {
 }
 
 main().catch((err) => {
+  // Best-effort debug log — repoRoot may not be set if we crashed very early
+  try {
+    const root = execSync('git rev-parse --show-toplevel', { encoding: 'utf8' }).trim();
+    debugLog(root, `EXIT: unexpected error — ${err.message}\n${err.stack}`);
+  } catch { /* ignore */ }
   console.error('Gatekeeper: Unexpected error:', err.message);
   process.exit(0); // fail open
 });
