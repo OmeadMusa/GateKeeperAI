@@ -48,6 +48,12 @@ export async function prompt(reviewResult, { nonInteractive = false, repoRoot = 
     return handleNonInteractive(status, issues ?? [], summary, repoRoot);
   }
 
+  // Write LAST_REVIEW.md for interactive sessions too, so the file is always
+  // up-to-date regardless of how the push was initiated.
+  if (repoRoot) {
+    writeLastReview(repoRoot, status, issues ?? [], summary);
+  }
+
   if (status === 'yellow') {
     return handleYellow(issues ?? [], summary);
   }
