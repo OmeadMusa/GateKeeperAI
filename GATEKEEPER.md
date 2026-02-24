@@ -2,12 +2,10 @@
 
 ## Protected Files
 Never modify these files without explicit user instruction:
-- bin/cli.js
-- src/gatekeeper.js
-- src/hook.js
-- package.json
-- templates/GATEKEEPER.md
-- .gitattributes
+- `src/gatekeeper.js` — contains the AI system prompt; changing it changes what Gatekeeper reviews for
+- `templates/GATEKEEPER.md` — the default template written to new repos on init
+
+Note: `bin/cli.js`, `src/hook.js`, and `package.json` are core infrastructure that evolves with the tool — changes to them should be reviewed carefully but are expected.
 
 ## Rules
 - This is a Node.js ESM project (`"type": "module"`) — all files must use ES module syntax (`import`/`export`), never `require()`
