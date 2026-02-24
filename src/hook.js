@@ -48,12 +48,14 @@ async function main() {
 
   // Read push info from env var (set by the shell hook, which captured stdin
   // before reopening /dev/tty so the terminal UI can show interactive prompts).
+  // GUI clients (VSCode, Tower, etc.) often pass empty stdin, so we fall back
+  // to inferring the commit range directly from git when pushInfo is absent.
   const pushInfo = process.env.GATEKEEPER_PUSH_DATA || '';
 
   // Parse the ranges of commits being pushed
-  const commitRange = parsePushInfo(pushInfo, repoRoot);
+  const commitRange = parsePushInfo(pushInfo, repoRoot) || inferCommitRange(repoRoot);
   if (!commitRange) {
-    // Nothing being pushed (e.g. tag-only push or empty), allow
+    // Truly nothing to push (e.g. tag-only, already up-to-date)
     process.exit(0);
   }
 
@@ -86,10 +88,6 @@ async function main() {
   // Check diff hash cache to avoid re-reviewing identical diffs
   const diffHash = createHash('sha256').update(diff).digest('hex');
   const cachedResult = readCache(repoRoot, diffHash);
-  if (cachedResult) {
-    console.log(`\n✅ Gatekeeper: Same diff reviewed recently — ${cachedResult.summary}`);
-    process.exit(cachedResult.status === 'green' ? 0 : 0); // cached results auto-approve
-  }
 
   // Read optional user request from GATEKEEPER_REQUEST env var
   // (Claude Code or the user can set this before pushing)
@@ -102,17 +100,29 @@ async function main() {
   const { prompt } = await import(join(pkgRoot, 'src', 'terminal-ui.js'));
   const { logReview } = await import(join(pkgRoot, 'src', 'logger.js'));
 
-  console.log('\nGatekeeper: Reviewing your changes...');
-
   let reviewResult;
-  try {
-    const repoContext = await buildContext({ repoRoot });
-    reviewResult = await review({ diff, repoContext, userRequest, apiKey });
-    writeCache(repoRoot, diffHash, reviewResult);
-  } catch (err) {
-    console.error('Gatekeeper: Review failed:', err.message);
-    // Fail open — don't block the push if Gatekeeper itself errors
+
+  if (cachedResult && cachedResult.status === 'green') {
+    // Green cached result: auto-pass without re-reviewing or showing UI
+    console.log(`\n✅ Gatekeeper: Same diff reviewed recently — ${cachedResult.summary}`);
     process.exit(0);
+  } else if (cachedResult) {
+    // Non-green cached result: skip the API call but still show the UI
+    // so the user must acknowledge the issue before the push goes through.
+    console.log('\nGatekeeper: Replaying cached review result...');
+    reviewResult = cachedResult;
+  } else {
+    // Fresh review
+    console.log('\nGatekeeper: Reviewing your changes...');
+    try {
+      const repoContext = await buildContext({ repoRoot });
+      reviewResult = await review({ diff, repoContext, userRequest, apiKey });
+      writeCache(repoRoot, diffHash, reviewResult);
+    } catch (err) {
+      console.error('Gatekeeper: Review failed:', err.message);
+      // Fail open — don't block the push if Gatekeeper itself errors
+      process.exit(0);
+    }
   }
 
   // Detect whether we have an interactive terminal by trying to open /dev/tty.
@@ -265,6 +275,54 @@ function parsePushInfo(pushInfo, repoRoot) {
 
   // If multiple refs, use the first (most common case)
   return ranges[0];
+}
+
+/**
+ * Fallback commit range inference for when stdin push data is unavailable
+ * (e.g. GUI clients like VSCode, Tower, Fork that don't pipe stdin to hooks).
+ *
+ * Strategy: find all local commits that haven't reached any remote tracking
+ * branch, and diff from the oldest of those to HEAD.
+ */
+function inferCommitRange(repoRoot) {
+  try {
+    // Get all remote tracking refs so we can find the boundary
+    const remoteHeads = execSync('git for-each-ref --format="%(objectname)" refs/remotes', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim().split('\n').filter(Boolean);
+
+    if (remoteHeads.length === 0) {
+      // No remotes at all — diff the last commit only
+      return 'HEAD~1..HEAD';
+    }
+
+    // Find commits reachable from HEAD but not from any remote tracking branch
+    const excludes = remoteHeads.map((sha) => `^${sha}`).join(' ');
+    const unpushed = execSync(`git log --format="%H" HEAD ${excludes}`, {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim().split('\n').filter(Boolean);
+
+    if (unpushed.length === 0) {
+      // Everything is already on a remote — nothing to review
+      return null;
+    }
+
+    // Diff from just before the oldest unpushed commit to HEAD
+    const oldest = unpushed[unpushed.length - 1];
+    return `${oldest}~1..HEAD`;
+  } catch {
+    // Last resort: just review HEAD
+    try {
+      execSync('git rev-parse HEAD~1', { cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] });
+      return 'HEAD~1..HEAD';
+    } catch {
+      return null;
+    }
+  }
 }
 
 /**
