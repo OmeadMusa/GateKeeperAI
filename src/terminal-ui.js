@@ -93,7 +93,7 @@ async function handleNonInteractive(status, issues, summary, repoRoot) {
     return 'approve';
   }
 
-  // Red: block and try to open an interactive terminal for the user
+  // Red: block, send a system notification, and print clear next steps
   console.log(bold(red(`🔴 Gatekeeper: ${count} CRITICAL issue${count === 1 ? '' : 's'} — push blocked`)));
   for (const issue of issues.filter((i) => i.severity === 'critical')) {
     console.log(`   🚨 ${issue.plain_english}`);
@@ -110,59 +110,32 @@ async function handleNonInteractive(status, issues, summary, repoRoot) {
   if (repoRoot) {
     console.log(`   📋 Full details + fix instructions: .gatekeeper/LAST_REVIEW.md`);
     console.log('');
-    // Spawn an interactive terminal so the user can respond without using the CLI
-    const opened = await openReviewTerminal(repoRoot);
-    if (opened) {
-      console.log(dim('   A review window has been opened — respond there to allow or cancel the push.'));
-    } else {
-      console.log(dim('   To override: GATEKEEPER_OVERRIDE=1 git push'));
-    }
+    console.log(dim('   Open a terminal in this repo and run:'));
+    console.log(`       npx gatekeeper-ai review`);
     console.log('');
+    // Best-effort system notification so the user knows to act even if output is buried
+    await sendNotification('🔴 Gatekeeper blocked your push', `${count} critical issue${count === 1 ? '' : 's'} found. Run: npx gatekeeper-ai review`);
   }
 
   return 'fix';
 }
 
 /**
- * Spawn a new terminal window running `npx gatekeeper-ai review` so the user
- * can interact with the review result from a GUI client push.
- *
- * Returns true if a terminal was successfully opened, false otherwise.
+ * Send a best-effort OS notification. Never throws — notification failure
+ * must never affect push behaviour.
  */
-async function openReviewTerminal(repoRoot) {
-  const { execSync, spawn } = await import('child_process');
-  const { platform } = process;
-
-  // The command to run inside the new terminal
-  const reviewCmd = `cd ${JSON.stringify(repoRoot)} && npx gatekeeper-ai review; echo "Press any key to close..."; read -n1`;
-
+async function sendNotification(title, message) {
   try {
-    if (platform === 'darwin') {
-      // macOS: use AppleScript to open a new Terminal.app window
-      const script = `tell application "Terminal"
-  activate
-  do script ${JSON.stringify(reviewCmd)}
-end tell`;
-      execSync(`osascript -e ${JSON.stringify(script)}`, { stdio: ['ignore', 'ignore', 'ignore'] });
-      return true;
-    } else if (platform === 'linux') {
-      // Linux: try common terminal emulators
-      const terminals = [
-        ['gnome-terminal', '--', 'bash', '-c', reviewCmd],
-        ['xterm', '-e', reviewCmd],
-        ['konsole', '-e', reviewCmd],
-      ];
-      for (const [bin, ...args] of terminals) {
-        try {
-          execSync(`which ${bin}`, { stdio: ['ignore', 'ignore', 'ignore'] });
-          spawn(bin, args, { detached: true, stdio: 'ignore' }).unref();
-          return true;
-        } catch { /* try next */ }
-      }
+    const { execSync } = await import('child_process');
+    if (process.platform === 'darwin') {
+      const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`;
+      execSync(`osascript -e ${JSON.stringify(script)}`, { stdio: ['ignore', 'ignore', 'ignore'], timeout: 3000 });
     }
-  } catch { /* fall through */ }
-
-  return false;
+    // Linux: notify-send (optional, silently skipped if not installed)
+    else if (process.platform === 'linux') {
+      execSync(`notify-send ${JSON.stringify(title)} ${JSON.stringify(message)}`, { stdio: ['ignore', 'ignore', 'ignore'], timeout: 3000 });
+    }
+  } catch { /* notifications are best-effort */ }
 }
 
 /**
@@ -176,7 +149,7 @@ function writeLastReview(repoRoot, status, issues, summary) {
 
     const ts = new Date().toLocaleString();
     const emoji = status === 'yellow' ? '🟡' : '🔴';
-    const heading = status === 'yellow' ? 'Warnings — push blocked' : 'CRITICAL issues — push blocked';
+    const heading = status === 'yellow' ? 'Warnings — push allowed' : 'CRITICAL issues — push blocked';
 
     const lines = [
       `# ${emoji} Gatekeeper Review`,
@@ -203,9 +176,9 @@ function writeLastReview(repoRoot, status, issues, summary) {
     lines.push('---');
     lines.push('');
     if (status === 'yellow') {
-      lines.push('To push anyway (bypass warnings): `GATEKEEPER_ALLOW_WARNINGS=1 git push`');
+      lines.push('Your push went through. These are informational warnings only.');
     } else {
-      lines.push('To override (bypass critical issues): `GATEKEEPER_OVERRIDE=1 git push`');
+      lines.push('Your push was blocked. To override: `GATEKEEPER_OVERRIDE=1 git push`');
     }
     lines.push('');
 
