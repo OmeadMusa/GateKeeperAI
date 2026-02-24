@@ -179,6 +179,11 @@ async function main() {
   // Exit code determines whether git allows the push
   if (userAction === 'fix') {
     debugLog(repoRoot, 'EXIT 1: user chose fix — blocking push');
+    // Write the pending review so `npx gatekeeper-ai review` can pick it up
+    try {
+      const pendingPath = join(repoRoot, '.gatekeeper', 'last-review.json');
+      writeFileSync(pendingPath, JSON.stringify(reviewResult, null, 2), 'utf8');
+    } catch { /* ignore */ }
     console.log('\nGatekeeper: Push cancelled. Fix the issue and try again.\n');
     process.exit(1); // block push
   }

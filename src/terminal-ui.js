@@ -59,62 +59,47 @@ export async function prompt(reviewResult, { nonInteractive = false, repoRoot = 
 /**
  * Non-interactive mode (no /dev/tty — running inside a GUI client or CI).
  *
- * Both yellow and red block the push. We write a LAST_REVIEW.md file to
- * .gatekeeper/ so the user has a persistent, readable record of what
- * happened and exactly what to do next — critical when the hook output
- * is buried in a GUI client's output panel.
+ * Yellow: warn and pass. The push is allowed but warnings are printed and
+ * written to LAST_REVIEW.md so the user can review them at leisure.
  *
- * Override paths:
- *   GATEKEEPER_ALLOW_WARNINGS=1  bypass yellow warnings
- *   GATEKEEPER_OVERRIDE=1        bypass red critical issues
+ * Red: block the push and spawn an interactive terminal window so the user
+ * can respond to the review without leaving their GUI client.
+ *
+ * Override path for red:
+ *   GATEKEEPER_OVERRIDE=1  bypass critical issues
  */
 async function handleNonInteractive(status, issues, summary, repoRoot) {
   const isYellow = status === 'yellow';
-  const emoji = isYellow ? '🟡' : '🔴';
-  const label = isYellow ? 'warnings' : 'CRITICAL issues';
   const count = issues.length;
 
-  // Always write a LAST_REVIEW.md so the user can find the details
+  // Always write LAST_REVIEW.md for non-green results
   if (repoRoot) {
     writeLastReview(repoRoot, status, issues, summary);
   }
 
   if (isYellow) {
-    console.log(bold(yellow(`${emoji} Gatekeeper: ${count} warning${count === 1 ? '' : 's'} found — push blocked`)));
+    // Yellow: warn but allow the push through
+    console.log(bold(yellow(`🟡 Gatekeeper: ${count} warning${count === 1 ? '' : 's'} — push allowed`)));
     for (const issue of issues) {
       console.log(`   ⚠️  ${issue.plain_english}`);
     }
     console.log('');
     console.log(dim(`   ${summary}`));
-    console.log('');
     if (repoRoot) {
-      console.log(`   📋 Full details + fix instructions: .gatekeeper/LAST_REVIEW.md`);
       console.log('');
+      console.log(`   📋 Details: .gatekeeper/LAST_REVIEW.md`);
     }
-    console.log(dim('   To push anyway: GATEKEEPER_ALLOW_WARNINGS=1 git push'));
     console.log('');
-
-    if (process.env.GATEKEEPER_ALLOW_WARNINGS === '1') {
-      console.log(yellow('   GATEKEEPER_ALLOW_WARNINGS=1 set — allowing push'));
-      return 'approve';
-    }
-
-    return 'fix';
+    return 'approve';
   }
 
-  // red
-  console.log(bold(red(`${emoji} Gatekeeper: ${count} CRITICAL issue${count === 1 ? '' : 's'} found — push blocked`)));
+  // Red: block and try to open an interactive terminal for the user
+  console.log(bold(red(`🔴 Gatekeeper: ${count} CRITICAL issue${count === 1 ? '' : 's'} — push blocked`)));
   for (const issue of issues.filter((i) => i.severity === 'critical')) {
     console.log(`   🚨 ${issue.plain_english}`);
   }
   console.log('');
   console.log(dim(`   ${summary}`));
-  console.log('');
-  if (repoRoot) {
-    console.log(`   📋 Full details + fix instructions: .gatekeeper/LAST_REVIEW.md`);
-    console.log('');
-  }
-  console.log(dim('   To override: GATEKEEPER_OVERRIDE=1 git push'));
   console.log('');
 
   if (process.env.GATEKEEPER_OVERRIDE === '1') {
@@ -122,7 +107,62 @@ async function handleNonInteractive(status, issues, summary, repoRoot) {
     return 'override';
   }
 
+  if (repoRoot) {
+    console.log(`   📋 Full details + fix instructions: .gatekeeper/LAST_REVIEW.md`);
+    console.log('');
+    // Spawn an interactive terminal so the user can respond without using the CLI
+    const opened = await openReviewTerminal(repoRoot);
+    if (opened) {
+      console.log(dim('   A review window has been opened — respond there to allow or cancel the push.'));
+    } else {
+      console.log(dim('   To override: GATEKEEPER_OVERRIDE=1 git push'));
+    }
+    console.log('');
+  }
+
   return 'fix';
+}
+
+/**
+ * Spawn a new terminal window running `npx gatekeeper-ai review` so the user
+ * can interact with the review result from a GUI client push.
+ *
+ * Returns true if a terminal was successfully opened, false otherwise.
+ */
+async function openReviewTerminal(repoRoot) {
+  const { execSync, spawn } = await import('child_process');
+  const { platform } = process;
+
+  // The command to run inside the new terminal
+  const reviewCmd = `cd ${JSON.stringify(repoRoot)} && npx gatekeeper-ai review; echo "Press any key to close..."; read -n1`;
+
+  try {
+    if (platform === 'darwin') {
+      // macOS: use AppleScript to open a new Terminal.app window
+      const script = `tell application "Terminal"
+  activate
+  do script ${JSON.stringify(reviewCmd)}
+end tell`;
+      execSync(`osascript -e ${JSON.stringify(script)}`, { stdio: ['ignore', 'ignore', 'ignore'] });
+      return true;
+    } else if (platform === 'linux') {
+      // Linux: try common terminal emulators
+      const terminals = [
+        ['gnome-terminal', '--', 'bash', '-c', reviewCmd],
+        ['xterm', '-e', reviewCmd],
+        ['konsole', '-e', reviewCmd],
+      ];
+      for (const [bin, ...args] of terminals) {
+        try {
+          execSync(`which ${bin}`, { stdio: ['ignore', 'ignore', 'ignore'] });
+          spawn(bin, args, { detached: true, stdio: 'ignore' }).unref();
+          return true;
+        } catch { /* try next */ }
+      }
+    }
+  } catch { /* fall through */ }
+
+  return false;
 }
 
 /**

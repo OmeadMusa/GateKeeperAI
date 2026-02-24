@@ -57,10 +57,23 @@ Return ONLY valid JSON in this exact schema — no explanation, no markdown:
   "summary": "One sentence plain-english summary of the overall review"
 }
 
+Severity rules — be conservative, err toward green:
+- A "warning" is a minor deviation (style, missing log, minor pattern inconsistency).
+  It is INFORMATIONAL only — the push will still go through.
+- A "critical" issue is something that will actively break the codebase:
+  deleting a function that is called elsewhere, breaking a shared interface,
+  modifying a protected file without authorisation, or adding completely
+  disconnected dead code with no entry point.
+  Critical issues BLOCK the push.
+
 Status rules:
-- green: no issues found
-- yellow: issues found but none are critical
-- red: one or more critical issues found
+- green: no issues, or only very minor observations not worth surfacing
+- yellow: one or more warnings (informational, push allowed)
+- red: one or more critical issues (push blocked)
+
+When in doubt, go green. Only flag something as yellow if it is a genuine
+pattern deviation that a human developer should know about. Only flag critical
+if the change will demonstrably break something or violate an explicit rule.
 
 If no issues are found, return an empty issues array.`;
 

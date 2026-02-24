@@ -29,6 +29,9 @@ switch (command) {
   case 'stats':
     runStats().catch(fatalError);
     break;
+  case 'review':
+    runReview().catch(fatalError);
+    break;
   default:
     printUsage();
     process.exit(command ? 1 : 0);
@@ -334,6 +337,65 @@ async function runStats() {
   }
 }
 
+// ─── review ──────────────────────────────────────────────────────────────────
+
+async function runReview() {
+  const repoRoot = getRepoRoot();
+  if (!repoRoot) {
+    console.error(red('Error: Not inside a git repository.'));
+    process.exit(1);
+  }
+
+  const lastReviewPath = join(repoRoot, '.gatekeeper', 'last-review.json');
+  if (!existsSync(lastReviewPath)) {
+    console.log('');
+    console.log(yellow('No pending review found.'));
+    console.log(dim('Gatekeeper only has a review to show when a push was blocked.'));
+    console.log('');
+    process.exit(0);
+  }
+
+  let reviewResult;
+  try {
+    reviewResult = JSON.parse(readFileSync(lastReviewPath, 'utf8'));
+  } catch {
+    console.error(red('Error: Could not read last review. Try pushing again.'));
+    process.exit(1);
+  }
+
+  const { prompt } = await import(join(PKG_ROOT, 'src', 'terminal-ui.js'));
+  const { logReview } = await import(join(PKG_ROOT, 'src', 'logger.js'));
+
+  // Run the full interactive UI — this terminal has a real TTY
+  const userAction = await prompt(reviewResult, { nonInteractive: false, repoRoot });
+
+  try {
+    await logReview({ repoRoot, reviewResult, userAction });
+  } catch { /* ignore */ }
+
+  if (userAction === 'fix') {
+    console.log('');
+    console.log(dim('Push cancelled. Fix the issues above and push again.'));
+    console.log('');
+    // Remove the pending review so we don't re-show it
+    try { (await import('fs')).unlinkSync(lastReviewPath); } catch { /* ignore */ }
+    process.exit(1);
+  }
+
+  // User approved or overrode — now actually do the push
+  console.log('');
+  console.log(dim('Re-pushing with your decision...'));
+  try {
+    const pushEnv = userAction === 'override'
+      ? { ...process.env, GATEKEEPER_OVERRIDE: '1' }
+      : { ...process.env, GATEKEEPER_ALLOW_WARNINGS: '1' };
+    execSync('git push', { cwd: repoRoot, stdio: 'inherit', env: pushEnv });
+  } catch {
+    // git push failure is reported by git itself
+  }
+  try { (await import('fs')).unlinkSync(lastReviewPath); } catch { /* ignore */ }
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function getRepoRoot() {
@@ -398,6 +460,7 @@ function printUsage() {
   console.log('Usage:');
   console.log(`  ${cyan('npx gatekeeper-ai init')}    Install Gatekeeper in the current git repo`);
   console.log(`  ${cyan('npx gatekeeper-ai scan')}    Regenerate GATEKEEPER.md by rescanning the repo`);
+  console.log(`  ${cyan('npx gatekeeper-ai review')}  Respond to a blocked push (opens interactive UI)`);
   console.log(`  ${cyan('npx gatekeeper-ai stats')}   Show review history for this repo`);
   console.log('');
 }
