@@ -11,7 +11,7 @@ Never modify these files without explicit user instruction:
 
 ## Rules
 - This is a Node.js ESM project (`"type": "module"`) — all files must use ES module syntax (`import`/`export`), never `require()`
-- All AI/Claude API interactions must go through `src/gatekeeper.js`
+- Diff review API calls must go through `src/gatekeeper.js`; repo scan API calls go through `src/scanner.js` — do not make Anthropic API calls elsewhere
 - All terminal output and UI rendering must go through `src/terminal-ui.js` and `src/logger.js`
 - Colour handling must go through `src/colors.js` — do not introduce additional colour/styling libraries
 - Repo context assembly must go through `src/context-builder.js`

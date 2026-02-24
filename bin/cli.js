@@ -222,19 +222,21 @@ function buildChainedHookScript(existingScript, hookJsPath) {
 # Gatekeeper AI — pre-push hook (chained)
 # Original hook preserved below.
 
-# Run original hook first
+# Capture git's push data FIRST, before either hook consumes stdin.
+GATEKEEPER_PUSH_DATA=$(cat)
+
+# Run original hook with the push data piped to its stdin.
 __original_hook() {
 ${existingBody}
 }
 
-__original_hook
+echo "$GATEKEEPER_PUSH_DATA" | __original_hook
 ORIGINAL_EXIT=$?
 if [ $ORIGINAL_EXIT -ne 0 ]; then
   exit $ORIGINAL_EXIT
 fi
 
-# Now run Gatekeeper
-GATEKEEPER_PUSH_DATA=$(cat)
+# Now run Gatekeeper (push data already captured above).
 GATEKEEPER_PUSH_DATA="$GATEKEEPER_PUSH_DATA" node "${hookJsPath}"
 exit $?
 `;
