@@ -55,21 +55,38 @@ export async function prompt(reviewResult, { nonInteractive = false } = {}) {
 }
 
 /**
- * Non-interactive mode: print the result, auto-approve yellow, block red.
+ * Non-interactive mode (no /dev/tty — running inside an agent or CI).
+ *
+ * Both yellow and red block the push. Blocking is what forces the agent
+ * (e.g. Claude Code) to surface the issue to the user in its current
+ * response — a successful exit 0 would let it move on silently.
+ *
+ * Override paths:
+ *   GATEKEEPER_ALLOW_WARNINGS=1  bypass yellow warnings
+ *   GATEKEEPER_OVERRIDE=1        bypass red critical issues
  */
 async function handleNonInteractive(status, issues, summary) {
   if (status === 'yellow') {
     const count = issues.length;
-    console.log(bold(yellow(`🟡 Gatekeeper: ${count} warning${count === 1 ? '' : 's'} — pushing anyway (no interactive terminal)`)));
+    console.log(bold(yellow(`🟡 Gatekeeper: ${count} warning${count === 1 ? '' : 's'} found — push blocked`)));
     for (const issue of issues) {
       console.log(`   ⚠️  ${issue.plain_english}`);
+      console.log(`   Fix: ${dim(issue.fix_prompt)}`);
     }
     console.log(dim(`   ${summary}`));
     console.log('');
-    return 'approve';
+    console.log(dim('   To push anyway: GATEKEEPER_ALLOW_WARNINGS=1 git push'));
+    console.log('');
+
+    if (process.env.GATEKEEPER_ALLOW_WARNINGS === '1') {
+      console.log(yellow('   GATEKEEPER_ALLOW_WARNINGS=1 set — allowing push'));
+      return 'approve';
+    }
+
+    return 'fix';
   }
 
-  // red — block even without a terminal, critical issues should never silently pass
+  // red
   const count = issues.length;
   console.log(bold(red(`🔴 Gatekeeper: CRITICAL issue${count === 1 ? '' : 's'} found — push blocked`)));
   for (const issue of issues.filter((i) => i.severity === 'critical')) {
@@ -78,11 +95,9 @@ async function handleNonInteractive(status, issues, summary) {
   }
   console.log(dim(`   ${summary}`));
   console.log('');
-  console.log(dim('   No interactive terminal available. Fix the issue and push again,'));
-  console.log(dim('   or set GATEKEEPER_OVERRIDE=1 to bypass.'));
+  console.log(dim('   To override: GATEKEEPER_OVERRIDE=1 git push'));
   console.log('');
 
-  // Allow a hard env-var bypass for CI or scripted contexts
   if (process.env.GATEKEEPER_OVERRIDE === '1') {
     console.log(yellow('   GATEKEEPER_OVERRIDE=1 set — allowing push'));
     return 'override';
