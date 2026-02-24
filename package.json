@@ -1,0 +1,33 @@
+{
+  "name": "gatekeeper-ai",
+  "version": "0.1.0",
+  "description": "A git hook tool that reviews commits for repo integrity issues using AI",
+  "type": "module",
+  "bin": {
+    "gatekeeper-ai": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "templates/"
+  ],
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "git",
+    "hook",
+    "ai",
+    "code-review",
+    "anthropic",
+    "claude"
+  ],
+  "license": "MIT"
+}
