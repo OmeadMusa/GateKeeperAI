@@ -13,9 +13,11 @@ import { RESET, BOLD, DIM, RED, GREEN, YELLOW, CYAN, bold, dim, red, green, yell
  * Render the review result and collect the user's decision.
  *
  * @param {object} reviewResult - The structured result from gatekeeper.js
+ * @param {object} [options]
+ * @param {boolean} [options.nonInteractive] - No TTY available; auto-decide instead of prompting
  * @returns {Promise<'approve'|'fix'|'override'>}
  */
-export async function prompt(reviewResult) {
+export async function prompt(reviewResult, { nonInteractive = false } = {}) {
   const { status, issues, summary } = reviewResult;
 
   process.stdout.write('\n');
@@ -24,12 +26,53 @@ export async function prompt(reviewResult) {
     return handleGreen(summary);
   }
 
+  if (nonInteractive) {
+    return handleNonInteractive(status, issues, summary);
+  }
+
   if (status === 'yellow') {
     return handleYellow(issues, summary);
   }
 
   // red
   return handleRed(issues, summary);
+}
+
+/**
+ * Non-interactive mode: print the result, auto-approve yellow, block red.
+ */
+async function handleNonInteractive(status, issues, summary) {
+  if (status === 'yellow') {
+    const count = issues.length;
+    console.log(bold(yellow(`🟡 Gatekeeper: ${count} warning${count === 1 ? '' : 's'} — pushing anyway (no interactive terminal)`)));
+    for (const issue of issues) {
+      console.log(`   ⚠️  ${issue.plain_english}`);
+    }
+    console.log(dim(`   ${summary}`));
+    console.log('');
+    return 'approve';
+  }
+
+  // red — block even without a terminal, critical issues should never silently pass
+  const count = issues.length;
+  console.log(bold(red(`🔴 Gatekeeper: CRITICAL issue${count === 1 ? '' : 's'} found — push blocked`)));
+  for (const issue of issues.filter((i) => i.severity === 'critical')) {
+    console.log(`   🚨 ${issue.plain_english}`);
+    console.log(`   Fix: ${dim(issue.fix_prompt)}`);
+  }
+  console.log(dim(`   ${summary}`));
+  console.log('');
+  console.log(dim('   No interactive terminal available. Fix the issue and push again,'));
+  console.log(dim('   or set GATEKEEPER_OVERRIDE=1 to bypass.'));
+  console.log('');
+
+  // Allow a hard env-var bypass for CI or scripted contexts
+  if (process.env.GATEKEEPER_OVERRIDE === '1') {
+    console.log(yellow('   GATEKEEPER_OVERRIDE=1 set — allowing push'));
+    return 'override';
+  }
+
+  return 'fix';
 }
 
 /**

@@ -92,10 +92,13 @@ async function main() {
     process.exit(0);
   }
 
-  // Render terminal UI and get user decision
+  // Render terminal UI and get user decision.
+  // In non-interactive mode (no /dev/tty), print the result but don't prompt —
+  // allow yellow, block red so critical issues still surface.
+  const nonInteractive = !!process.env.GATEKEEPER_NON_INTERACTIVE;
   let userAction;
   try {
-    userAction = await prompt(reviewResult);
+    userAction = await prompt(reviewResult, { nonInteractive });
   } catch (err) {
     console.error('Gatekeeper: UI error:', err.message);
     process.exit(0); // fail open
