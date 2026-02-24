@@ -17,9 +17,16 @@
  */
 
 import { execSync } from 'child_process';
-import { readFileSync, existsSync, openSync, closeSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from 'fs';
+import { createHash } from 'crypto';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+
+// Skip review if fewer than this many changed lines (trivial pushes)
+const TRIVIAL_LINE_THRESHOLD = 20;
+
+// Cache TTL: don't re-review the same diff within this window
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // Resolve the gatekeeper-ai package root so we can import modules from it.
 // When installed via npm, __dirname is inside node_modules/gatekeeper-ai/src/.
@@ -69,6 +76,21 @@ async function main() {
     process.exit(0);
   }
 
+  // Skip trivial pushes (below line threshold)
+  const changedLines = diff.split('\n').filter((l) => l.startsWith('+') || l.startsWith('-')).length;
+  if (changedLines < TRIVIAL_LINE_THRESHOLD) {
+    console.log(`✅ Gatekeeper: Trivial change (${changedLines} lines) — skipping review`);
+    process.exit(0);
+  }
+
+  // Check diff hash cache to avoid re-reviewing identical diffs
+  const diffHash = createHash('sha256').update(diff).digest('hex');
+  const cachedResult = readCache(repoRoot, diffHash);
+  if (cachedResult) {
+    console.log(`\n✅ Gatekeeper: Same diff reviewed recently — ${cachedResult.summary}`);
+    process.exit(cachedResult.status === 'green' ? 0 : 0); // cached results auto-approve
+  }
+
   // Read optional user request from GATEKEEPER_REQUEST env var
   // (Claude Code or the user can set this before pushing)
   const userRequest = process.env.GATEKEEPER_REQUEST || null;
@@ -84,8 +106,9 @@ async function main() {
 
   let reviewResult;
   try {
-    const repoContext = await buildContext({ repoRoot, diff });
+    const repoContext = await buildContext({ repoRoot });
     reviewResult = await review({ diff, repoContext, userRequest, apiKey });
+    writeCache(repoRoot, diffHash, reviewResult);
   } catch (err) {
     console.error('Gatekeeper: Review failed:', err.message);
     // Fail open — don't block the push if Gatekeeper itself errors
@@ -118,6 +141,46 @@ async function main() {
 
   // 'approve' or 'override' — allow the push
   process.exit(0);
+}
+
+/**
+ * Read a cached review result for this diff hash, if it exists and is fresh.
+ */
+function readCache(repoRoot, diffHash) {
+  const cachePath = join(repoRoot, '.gatekeeper', 'cache.json');
+  if (!existsSync(cachePath)) return null;
+  try {
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8'));
+    const entry = cache[diffHash];
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > CACHE_TTL_MS) return null;
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a review result to the diff hash cache.
+ */
+function writeCache(repoRoot, diffHash, reviewResult) {
+  const cacheDir = join(repoRoot, '.gatekeeper');
+  const cachePath = join(cacheDir, 'cache.json');
+  try {
+    if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
+    let cache = {};
+    if (existsSync(cachePath)) {
+      try { cache = JSON.parse(readFileSync(cachePath, 'utf8')); } catch { /* start fresh */ }
+    }
+    cache[diffHash] = { status: reviewResult.status, summary: reviewResult.summary, timestamp: Date.now() };
+    // Prune entries older than TTL to keep the file small
+    for (const [key, entry] of Object.entries(cache)) {
+      if (Date.now() - entry.timestamp > CACHE_TTL_MS) delete cache[key];
+    }
+    writeFileSync(cachePath, JSON.stringify(cache, null, 2), 'utf8');
+  } catch {
+    // Cache write failure must never block a push
+  }
 }
 
 /**

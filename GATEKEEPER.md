@@ -17,12 +17,13 @@ Note: `bin/cli.js`, `src/hook.js`, and `package.json` are core infrastructure th
 - Source files belong in `src/` — do not place logic in `bin/`
 - Project templates belong in `templates/` — do not hardcode template content in source files
 - Do not add runtime dependencies without explicit user instruction; keep the dependency footprint minimal
-- The Claude model in use is `claude-sonnet-4-6` — do not change the model without explicit instruction
+- The diff review model is `claude-haiku-4-5-20251001`; the repo scanner uses `claude-sonnet-4-6` — do not change either model without explicit instruction
 - Max tokens per review is 1024 — do not increase this without explicit instruction
+- `.gatekeeper/cache.json` is runtime-generated and gitignored — do not commit it or treat it as a source file
 - Never hardcode API keys or secrets; the Anthropic API key must be read from `.env` only
 - Tests must be run via Jest with `--experimental-vm-modules` as configured in `package.json`
 - Node.js >= 18.0.0 is required — do not use APIs unavailable in Node 18
-- `.gatekeeper/log.json` is runtime-generated and gitignored — do not commit it or treat it as a source file
+- `.gatekeeper/log.json` and `.gatekeeper/cache.json` are runtime-generated and gitignored — do not commit them or treat them as source files
 
 ## Stack
 - **Language:** JavaScript (Node.js, ESM)

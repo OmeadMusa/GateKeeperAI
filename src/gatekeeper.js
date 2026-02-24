@@ -80,7 +80,7 @@ export async function review({ diff, repoContext, userRequest, apiKey }) {
   const userContent = buildUserMessage({ diff, repoContext, userRequest });
 
   const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: 1024,
     system: SYSTEM_PROMPT,
     messages: [
@@ -112,20 +112,6 @@ function buildUserMessage({ diff, repoContext, userRequest }) {
   parts.push(`## Git Diff\n\`\`\`diff\n${diff}\n\`\`\``);
 
   parts.push(`## Repository File Tree\n${repoContext.fileTree}`);
-
-  if (repoContext.modifiedFileContents && Object.keys(repoContext.modifiedFileContents).length > 0) {
-    parts.push('## Modified File Contents');
-    for (const [filePath, content] of Object.entries(repoContext.modifiedFileContents)) {
-      parts.push(`### ${filePath}\n\`\`\`\n${content}\n\`\`\``);
-    }
-  }
-
-  if (repoContext.dependentSignatures && Object.keys(repoContext.dependentSignatures).length > 0) {
-    parts.push('## Signatures of Files That Import Modified Files');
-    for (const [filePath, signatures] of Object.entries(repoContext.dependentSignatures)) {
-      parts.push(`### ${filePath}\n${signatures}`);
-    }
-  }
 
   if (repoContext.gatekeeperRules) {
     parts.push(`## Project-Specific Rules (GATEKEEPER.md)\n${repoContext.gatekeeperRules}`);
