@@ -15,8 +15,7 @@
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.36.3",
-    "dotenv": "^16.4.5"
+    "@anthropic-ai/sdk": "^0.36.3"
   },
   "engines": {
     "node": ">=18.0.0"

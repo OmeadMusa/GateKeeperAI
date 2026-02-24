@@ -15,21 +15,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PKG_ROOT = resolve(__dirname, '..');
 
-// ANSI helpers
-const RESET = '\x1b[0m';
-const BOLD = '\x1b[1m';
-const DIM = '\x1b[2m';
-const GREEN = '\x1b[32m';
-const YELLOW = '\x1b[33m';
-const RED = '\x1b[31m';
-const CYAN = '\x1b[36m';
-
-function bold(s) { return `${BOLD}${s}${RESET}`; }
-function dim(s) { return `${DIM}${s}${RESET}`; }
-function green(s) { return `${GREEN}${s}${RESET}`; }
-function yellow(s) { return `${YELLOW}${s}${RESET}`; }
-function red(s) { return `${RED}${s}${RESET}`; }
-function cyan(s) { return `${CYAN}${s}${RESET}`; }
+import { bold, dim, red, green, yellow, cyan } from '../src/colors.js';
 
 const [,, command, ...args] = process.argv;
 

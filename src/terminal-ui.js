@@ -7,23 +7,7 @@
  */
 
 import { createInterface } from 'readline';
-
-// ANSI colour helpers
-const RESET = '\x1b[0m';
-const BOLD = '\x1b[1m';
-const DIM = '\x1b[2m';
-const RED = '\x1b[31m';
-const YELLOW = '\x1b[33m';
-const GREEN = '\x1b[32m';
-const CYAN = '\x1b[36m';
-const WHITE = '\x1b[37m';
-
-function bold(str) { return `${BOLD}${str}${RESET}`; }
-function dim(str) { return `${DIM}${str}${RESET}`; }
-function red(str) { return `${RED}${str}${RESET}`; }
-function yellow(str) { return `${YELLOW}${str}${RESET}`; }
-function green(str) { return `${GREEN}${str}${RESET}`; }
-function cyan(str) { return `${CYAN}${str}${RESET}`; }
+import { RESET, BOLD, DIM, RED, GREEN, YELLOW, CYAN, bold, dim, red, green, yellow, cyan } from './colors.js';
 
 /**
  * Render the review result and collect the user's decision.
