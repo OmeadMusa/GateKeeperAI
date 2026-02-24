@@ -25,7 +25,7 @@ Review the diff ONLY for these five issues, in priority order:
 2. INTERFACE BREAKAGE
    Does the diff change a function signature, rename an export, or modify a
    shared utility in a way that would break other files that depend on it?
-   Check the provided import graph.
+   Use the file tree and diff to reason about likely dependents.
 
 3. DISCONNECTED CODE
    Is new code being added that nothing calls, imports, or connects to?
