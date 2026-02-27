@@ -35,7 +35,7 @@ function openTtyStream() {
  * @param {string} [options.repoRoot] - Repo root path, used to write LAST_REVIEW.md
  * @returns {Promise<'approve'|'fix'|'override'>}
  */
-export async function prompt(reviewResult, { nonInteractive = false, repoRoot = null } = {}) {
+export async function prompt(reviewResult, { nonInteractive = false, repoRoot = null, isCachedReplay = false } = {}) {
   const { status, issues, summary } = reviewResult;
 
   process.stdout.write('\n');
@@ -55,11 +55,11 @@ export async function prompt(reviewResult, { nonInteractive = false, repoRoot = 
   }
 
   if (status === 'yellow') {
-    return handleYellow(issues ?? [], summary);
+    return handleYellow(issues ?? [], summary, isCachedReplay);
   }
 
   // red
-  return handleRed(issues ?? [], summary);
+  return handleRed(issues ?? [], summary, isCachedReplay);
 }
 
 /**
@@ -99,13 +99,8 @@ async function handleNonInteractive(status, issues, summary, repoRoot) {
     return 'approve';
   }
 
-  // Red: block, send a system notification, and print clear next steps
-  console.log(bold(red(`🔴 Gatekeeper: ${count} CRITICAL issue${count === 1 ? '' : 's'} — push blocked`)));
-  for (const issue of issues.filter((i) => i.severity === 'critical')) {
-    console.log(`   🚨 ${issue.plain_english}`);
-  }
-  console.log('');
-  console.log(dim(`   ${summary}`));
+  // Red: block the push and give clear next steps
+  console.log(bold(red(`🔴 Gatekeeper: Push blocked — ${count} CRITICAL issue${count === 1 ? '' : 's'} found`)));
   console.log('');
 
   if (process.env.GATEKEEPER_OVERRIDE === '1') {
@@ -113,15 +108,26 @@ async function handleNonInteractive(status, issues, summary, repoRoot) {
     return 'override';
   }
 
+  // Lead with the action — this is what the user needs to do
+  console.log(`   To respond, open the integrated terminal (${process.platform === 'darwin' ? 'Ctrl+`' : 'Ctrl+`'}) and run:`);
+  console.log(bold(`       npx gatekeeper-ai review`));
+  console.log('');
+
+  // Then show the issues
+  console.log('   Issues:');
+  for (const issue of issues.filter((i) => i.severity === 'critical')) {
+    console.log(`     🚨 ${issue.plain_english || 'Critical issue detected'}`);
+  }
+  console.log('');
+  console.log(dim(`   ${summary}`));
+
   if (repoRoot) {
-    console.log(`   📋 Full details + fix instructions: .gatekeeper/LAST_REVIEW.md`);
     console.log('');
-    console.log(dim('   Open a terminal in this repo and run:'));
-    console.log(`       npx gatekeeper-ai review`);
-    console.log('');
+    console.log(dim(`   Full details: .gatekeeper/LAST_REVIEW.md`));
     // Best-effort system notification so the user knows to act even if output is buried
     await sendNotification('🔴 Gatekeeper blocked your push', `${count} critical issue${count === 1 ? '' : 's'} found. Run: npx gatekeeper-ai review`);
   }
+  console.log('');
 
   return 'fix';
 }
@@ -161,21 +167,28 @@ function writeLastReview(repoRoot, status, issues, summary) {
       `# ${emoji} Gatekeeper Review`,
       `**${heading}**  ·  ${ts}`,
       '',
-      `## Summary`,
-      summary,
-      '',
-      `## Issues`,
-      '',
     ];
+
+    // Lead with actionable next step for blocked pushes
+    if (status === 'red') {
+      lines.push('> **Next step:** Open a terminal and run `npx gatekeeper-ai review` to respond interactively.');
+      lines.push('');
+    }
+
+    lines.push(`## Summary`);
+    lines.push(summary);
+    lines.push('');
+    lines.push(`## Issues`);
+    lines.push('');
 
     for (let i = 0; i < issues.length; i++) {
       const issue = issues[i];
       const sev = issue.severity === 'critical' ? '🚨 CRITICAL' : '⚠️  Warning';
       lines.push(`### ${i + 1}. ${sev}`);
-      lines.push(issue.plain_english);
+      lines.push(issue.plain_english || 'Issue details unavailable');
       lines.push('');
       lines.push('**How to fix:**');
-      lines.push(`> ${issue.fix_prompt}`);
+      lines.push(`> ${issue.fix_prompt || 'Review the change and verify it is intentional.'}`);
       lines.push('');
     }
 
@@ -189,8 +202,9 @@ function writeLastReview(repoRoot, status, issues, summary) {
     lines.push('');
 
     writeFileSync(join(dir, 'LAST_REVIEW.md'), lines.join('\n'), 'utf8');
-  } catch {
+  } catch (err) {
     // Never block a push due to file write failure
+    console.error(`Gatekeeper: Failed to write LAST_REVIEW.md: ${err.message}`);
   }
 }
 
@@ -205,35 +219,48 @@ async function handleGreen(summary) {
 /**
  * Yellow: warnings only.
  */
-async function handleYellow(issues, summary) {
+async function handleYellow(issues, summary, isCachedReplay = false) {
   const count = issues.length;
-  console.log(bold(yellow(`🟡 Gatekeeper Review — ${count} issue${count === 1 ? '' : 's'} found`)));
+  console.log(bold(yellow(`🟡 Gatekeeper Review — ${count} warning${count === 1 ? '' : 's'} found`)));
   console.log('');
 
   for (const issue of issues) {
     const icon = issue.severity === 'critical' ? red('🚨') : yellow('⚠️ ');
-    console.log(`  ${icon}  ${issue.plain_english}`);
+    console.log(`  ${icon}  ${issue.plain_english || 'Issue details unavailable'}`);
   }
 
   console.log('');
   console.log(dim(`Summary: ${summary}`));
   console.log('');
+  console.log(dim('These are informational warnings — your push will go through either way.'));
+  console.log('');
   console.log('What would you like to do?');
-  console.log(`  ${cyan('[A]')} Fix this first ${dim('(copies fix prompt to clipboard, cancels push)')}`);
-  console.log(`  ${cyan('[B]')} Push anyway`);
+  console.log(`  ${cyan('[A]')} See fix suggestions ${dim('(copies to clipboard, cancels push)')}`);
+  console.log(`  ${cyan('[B]')} Push anyway ${dim('← recommended')}`);
   console.log(`  ${cyan('[C]')} See full details`);
+  if (isCachedReplay) {
+    console.log(`  ${cyan('[R]')} Re-review ${dim('(force fresh API call)')}`);
+  }
   console.log('');
 
-  const choice = await readChoice(['a', 'b', 'c']);
+  const allowed = isCachedReplay ? ['a', 'b', 'c', 'r'] : ['a', 'b', 'c'];
+  const choice = await readChoice(allowed, 'b');
+
+  if (choice === 'r') return 're-review';
 
   if (choice === 'c') {
     printFullDetails(issues);
     console.log('');
     console.log('What would you like to do?');
-    console.log(`  ${cyan('[A]')} Fix this first ${dim('(copies fix prompt to clipboard, cancels push)')}`);
-    console.log(`  ${cyan('[B]')} Push anyway`);
+    console.log(`  ${cyan('[A]')} See fix suggestions ${dim('(copies to clipboard, cancels push)')}`);
+    console.log(`  ${cyan('[B]')} Push anyway ${dim('← recommended')}`);
+    if (isCachedReplay) {
+      console.log(`  ${cyan('[R]')} Re-review ${dim('(force fresh API call)')}`);
+    }
     console.log('');
-    const choice2 = await readChoice(['a', 'b']);
+    const allowed2 = isCachedReplay ? ['a', 'b', 'r'] : ['a', 'b'];
+    const choice2 = await readChoice(allowed2, 'b');
+    if (choice2 === 'r') return 're-review';
     return choice2 === 'a' ? copyAndFix(issues) : 'approve';
   }
 
@@ -244,14 +271,14 @@ async function handleYellow(issues, summary) {
 /**
  * Red: at least one critical issue.
  */
-async function handleRed(issues, summary) {
+async function handleRed(issues, summary, isCachedReplay = false) {
   const count = issues.length;
   console.log(bold(red(`🔴 Gatekeeper Review — CRITICAL issue${count === 1 ? '' : 's'} found`)));
   console.log('');
 
   for (const issue of issues) {
     const icon = issue.severity === 'critical' ? red('🚨') : yellow('⚠️ ');
-    console.log(`  ${icon}  ${issue.plain_english}`);
+    console.log(`  ${icon}  ${issue.plain_english || 'Issue details unavailable'}`);
   }
 
   console.log('');
@@ -261,9 +288,15 @@ async function handleRed(issues, summary) {
   console.log(`  ${cyan('[A]')} Fix this first ${dim('(copies fix prompt to clipboard, cancels push)')}  ${dim('← default')}`);
   console.log(`  ${cyan('[B]')} Push anyway ${red('(override)')}`);
   console.log(`  ${cyan('[C]')} See full details`);
+  if (isCachedReplay) {
+    console.log(`  ${cyan('[R]')} Re-review ${dim('(force fresh API call)')}`);
+  }
   console.log('');
 
-  const choice = await readChoice(['a', 'b', 'c'], 'a');
+  const allowed = isCachedReplay ? ['a', 'b', 'c', 'r'] : ['a', 'b', 'c'];
+  const choice = await readChoice(allowed, 'a');
+
+  if (choice === 'r') return 're-review';
 
   if (choice === 'c') {
     printFullDetails(issues);
@@ -271,8 +304,13 @@ async function handleRed(issues, summary) {
     console.log('What would you like to do?');
     console.log(`  ${cyan('[A]')} Fix this first ${dim('(copies fix prompt to clipboard, cancels push)')}  ${dim('← default')}`);
     console.log(`  ${cyan('[B]')} Push anyway ${red('(override)')}`);
+    if (isCachedReplay) {
+      console.log(`  ${cyan('[R]')} Re-review ${dim('(force fresh API call)')}`);
+    }
     console.log('');
-    const choice2 = await readChoice(['a', 'b'], 'a');
+    const allowed2 = isCachedReplay ? ['a', 'b', 'r'] : ['a', 'b'];
+    const choice2 = await readChoice(allowed2, 'a');
+    if (choice2 === 'r') return 're-review';
     if (choice2 === 'b') return confirmOverride();
     return copyAndFix(issues);
   }
@@ -292,13 +330,14 @@ function printFullDetails(issues) {
   for (let i = 0; i < issues.length; i++) {
     const issue = issues[i];
     const severityLabel = issue.severity === 'critical' ? red('[CRITICAL]') : yellow('[WARNING]');
-    const categoryLabel = cyan(`[${issue.category.toUpperCase().replace('_', ' ')}]`);
+    const category = (issue.category || 'general').toUpperCase().replaceAll('_', ' ');
+    const categoryLabel = cyan(`[${category}]`);
 
     console.log(`  ${i + 1}. ${severityLabel} ${categoryLabel}`);
-    console.log(`     ${issue.plain_english}`);
+    console.log(`     ${issue.plain_english || 'Issue details unavailable'}`);
     console.log('');
     console.log(`     ${dim('Fix instruction:')}`);
-    console.log(`     ${dim(issue.fix_prompt)}`);
+    console.log(`     ${dim(issue.fix_prompt || 'Review the change and verify it is intentional.')}`);
     console.log('');
   }
 }
@@ -323,17 +362,20 @@ async function copyAndFix(issues) {
   const criticalIssues = issues.filter((i) => i.severity === 'critical');
   const targetIssues = criticalIssues.length > 0 ? criticalIssues : issues;
 
-  const fixPrompts = targetIssues.map((i) => i.fix_prompt).join('\n\n');
+  const fixPrompts = targetIssues.map((i) => i.fix_prompt || 'Review the change and verify it is intentional.').join('\n\n');
 
   const copied = await copyToClipboard(fixPrompts);
   if (copied) {
-    console.log(green('✓ Fix instruction copied to clipboard.'));
-    console.log(dim('Paste it into Claude Code to fix the issue, then try pushing again.'));
+    console.log(green(`✓ Fix instructions for ${targetIssues.length} issue${targetIssues.length === 1 ? '' : 's'} copied to clipboard`));
+    console.log(dim('  Paste into Claude Code to fix, then push again.'));
   } else {
-    console.log(yellow('Could not copy to clipboard automatically. Fix instruction:'));
+    console.log(yellow('Could not copy to clipboard. Fix instructions:'));
     console.log('');
-    for (const issue of targetIssues) {
-      console.log(`  → ${issue.fix_prompt}`);
+    for (let i = 0; i < targetIssues.length; i++) {
+      const issue = targetIssues[i];
+      console.log(`  ${i + 1}. ${issue.plain_english || 'Issue detected'}`);
+      console.log(dim(`     Fix: ${issue.fix_prompt || 'Review the change and verify it is intentional.'}`));
+      console.log('');
     }
   }
 

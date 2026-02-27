@@ -56,6 +56,13 @@ async function main() {
 
   debugLog(repoRoot, `hook started | pid=${process.pid} | cwd=${repoRoot}`);
 
+  // Check for override flag (set by `npx gatekeeper-ai review` when user overrides)
+  if (process.env.GATEKEEPER_OVERRIDE === '1') {
+    debugLog(repoRoot, 'EXIT: GATEKEEPER_OVERRIDE=1 — skipping review');
+    console.log('Gatekeeper: Override active — skipping review');
+    process.exit(0);
+  }
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     debugLog(repoRoot, 'EXIT: no API key — failing open');
@@ -135,21 +142,29 @@ async function main() {
   } else if (cachedResult) {
     // Non-green cached result: skip the API call but still show the UI
     // so the user must acknowledge the issue before the push goes through.
+    const ageMs = Date.now() - cachedResult.timestamp;
+    const ageMin = Math.round(ageMs / 60000);
+    const ageLabel = ageMin < 1 ? 'just now' : `${ageMin} minute${ageMin === 1 ? '' : 's'} ago`;
     debugLog(repoRoot, `cache hit (${cachedResult.status}) — replaying through UI`);
-    console.log('\nGatekeeper: Replaying cached review result...');
+    console.log(`\nGatekeeper: Replaying review from ${ageLabel} (same diff detected — did you commit your fix?)`);
     reviewResult = cachedResult;
   } else {
     // Fresh review
     debugLog(repoRoot, 'no cache — calling review API');
     console.log('\nGatekeeper: Reviewing your changes...');
+    const slowTimer = setTimeout(() => {
+      console.log('  (still reviewing, large diffs take longer...)');
+    }, 5000);
     try {
       const repoContext = await buildContext({ repoRoot });
       reviewResult = await review({ diff, repoContext, userRequest, apiKey });
+      clearTimeout(slowTimer);
       debugLog(repoRoot, `review result: ${reviewResult.status} | issues=${reviewResult.issues?.length ?? 0}`);
       writeCache(repoRoot, diffHash, reviewResult);
     } catch (err) {
+      clearTimeout(slowTimer);
       debugLog(repoRoot, `EXIT: review API failed — ${err.message}`);
-      console.error('Gatekeeper: Review failed:', err.message);
+      console.error('Gatekeeper:', formatApiError(err));
       process.exit(0); // fail open
     }
   }
@@ -160,11 +175,36 @@ async function main() {
   debugLog(repoRoot, `nonInteractive=${nonInteractive}`);
   let userAction;
   try {
-    userAction = await prompt(reviewResult, { nonInteractive, repoRoot });
+    userAction = await prompt(reviewResult, { nonInteractive, repoRoot, isCachedReplay: !!cachedResult });
   } catch (err) {
     debugLog(repoRoot, `EXIT: UI error — ${err.message}`);
     console.error('Gatekeeper: UI error:', err.message);
     process.exit(0); // fail open
+  }
+
+  // If user chose to re-review, force a fresh API call
+  if (userAction === 're-review') {
+    debugLog(repoRoot, 'user requested re-review — calling API');
+    console.log('\nGatekeeper: Re-reviewing your changes...');
+    try {
+      const repoContext = await buildContext({ repoRoot });
+      reviewResult = await review({ diff, repoContext, userRequest, apiKey });
+      debugLog(repoRoot, `re-review result: ${reviewResult.status} | issues=${reviewResult.issues?.length ?? 0}`);
+      writeCache(repoRoot, diffHash, reviewResult);
+    } catch (err) {
+      debugLog(repoRoot, `EXIT: re-review API failed — ${err.message}`);
+      console.error('Gatekeeper:', formatApiError(err));
+      process.exit(0); // fail open
+    }
+
+    // Show the fresh result
+    try {
+      userAction = await prompt(reviewResult, { nonInteractive, repoRoot, isCachedReplay: false });
+    } catch (err) {
+      debugLog(repoRoot, `EXIT: UI error on re-review — ${err.message}`);
+      console.error('Gatekeeper: UI error:', err.message);
+      process.exit(0);
+    }
   }
 
   debugLog(repoRoot, `userAction=${userAction}`);
@@ -184,7 +224,8 @@ async function main() {
       const pendingPath = join(repoRoot, '.gatekeeper', 'last-review.json');
       writeFileSync(pendingPath, JSON.stringify(reviewResult, null, 2), 'utf8');
     } catch { /* ignore */ }
-    console.log('\nGatekeeper: Push cancelled. Fix the issue and try again.\n');
+    console.log('\nGatekeeper: Push cancelled. Fix the issues and push again.');
+    console.log(`Tip: Run \x1b[2mnpx gatekeeper-ai review\x1b[0m to see details or override.\n`);
     process.exit(1); // block push
   }
 
@@ -425,6 +466,32 @@ function canOpenTty() {
   } catch {
     return false;
   }
+}
+
+/**
+ * Map API errors to actionable user-facing messages.
+ */
+function formatApiError(err) {
+  const msg = err.message || '';
+  const status = err.status || err.statusCode || 0;
+
+  if (status === 401 || msg.includes('401') || msg.includes('Unauthorized')) {
+    return 'Invalid API key. Check ANTHROPIC_API_KEY in .env or run `npx gatekeeper-ai init`. Push allowed — review skipped.';
+  }
+  if (status === 429 || msg.includes('429') || msg.includes('rate')) {
+    return 'API rate limited. Push allowed — try again in a minute.';
+  }
+  if (status >= 500 || msg.includes('500') || msg.includes('502') || msg.includes('503')) {
+    return 'API temporarily unavailable. Push allowed — review skipped.';
+  }
+  if (msg.includes('timeout') || msg.includes('Timeout') || msg.includes('ETIMEDOUT') || msg.includes('AbortError')) {
+    return 'Review timed out after 30s. Push allowed — review skipped.';
+  }
+  if (msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED') || msg.includes('fetch failed') || msg.includes('network')) {
+    return 'Could not reach API (check your internet). Push allowed — review skipped.';
+  }
+
+  return `Review failed: ${msg}. Push allowed — review skipped.`;
 }
 
 main().catch((err) => {

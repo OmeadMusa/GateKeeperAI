@@ -32,6 +32,9 @@ switch (command) {
   case 'review':
     runReview().catch(fatalError);
     break;
+  case 'check':
+    runCheck().catch(fatalError);
+    break;
   default:
     printUsage();
     process.exit(command ? 1 : 0);
@@ -80,6 +83,8 @@ async function runInit() {
   console.log(dim('  • Edit GATEKEEPER.md to add project-specific rules'));
   console.log(dim('  • Set GATEKEEPER_REQUEST="<your task>" before pushing to give Gatekeeper context'));
   console.log(dim('  • Run `npx gatekeeper-ai stats` to see your review history'));
+  console.log('');
+  console.log(dim('Test it: Run `npx gatekeeper-ai check` to preview a review of your current changes.'));
   console.log('');
 }
 
@@ -386,14 +391,90 @@ async function runReview() {
   console.log('');
   console.log(dim('Re-pushing with your decision...'));
   try {
-    const pushEnv = userAction === 'override'
-      ? { ...process.env, GATEKEEPER_OVERRIDE: '1' }
-      : { ...process.env, GATEKEEPER_ALLOW_WARNINGS: '1' };
+    const pushEnv = { ...process.env, GATEKEEPER_OVERRIDE: '1' };
     execSync('git push', { cwd: repoRoot, stdio: 'inherit', env: pushEnv });
   } catch {
     // git push failure is reported by git itself
   }
   try { (await import('fs')).unlinkSync(lastReviewPath); } catch { /* ignore */ }
+}
+
+// ─── check ───────────────────────────────────────────────────────────────────
+
+async function runCheck() {
+  const repoRoot = getRepoRoot();
+  if (!repoRoot) {
+    console.error(red('Error: Not inside a git repository.'));
+    process.exit(1);
+  }
+
+  // Load API key
+  const envPath = join(repoRoot, '.env');
+  let apiKey = process.env.ANTHROPIC_API_KEY || null;
+  if (!apiKey && existsSync(envPath)) {
+    const content = readFileSync(envPath, 'utf8');
+    const match = content.match(/^ANTHROPIC_API_KEY\s*=\s*(.+)$/m);
+    if (match) apiKey = match[1].replace(/^['"]|['"]$/g, '').trim();
+  }
+  if (!apiKey) {
+    console.error(red('Error: No ANTHROPIC_API_KEY found. Run `npx gatekeeper-ai init` first.'));
+    process.exit(1);
+  }
+
+  // Get diff of staged + unstaged changes, falling back to HEAD diff
+  let diff;
+  try {
+    // First try staged + unstaged changes
+    diff = execSync('git diff HEAD', { cwd: repoRoot, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }).trim();
+    if (!diff) {
+      // No uncommitted changes — diff the last commit
+      diff = execSync('git diff HEAD~1..HEAD', { cwd: repoRoot, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }).trim();
+      if (diff) {
+        console.log(dim('No uncommitted changes — reviewing your last commit instead.'));
+      }
+    }
+  } catch {
+    console.error(red('Error: Could not get diff. Make sure you have at least one commit.'));
+    process.exit(1);
+  }
+
+  if (!diff) {
+    console.log('');
+    console.log(green('✅ No changes to review.'));
+    console.log(dim('Make some changes, then run this command again.'));
+    console.log('');
+    process.exit(0);
+  }
+
+  console.log('');
+  console.log('Gatekeeper: Checking your changes...');
+
+  const { buildContext } = await import(join(PKG_ROOT, 'src', 'context-builder.js'));
+  const { review } = await import(join(PKG_ROOT, 'src', 'gatekeeper.js'));
+  const { prompt } = await import(join(PKG_ROOT, 'src', 'terminal-ui.js'));
+
+  let reviewResult;
+  try {
+    const repoContext = await buildContext({ repoRoot });
+    reviewResult = await review({ diff, repoContext, userRequest: null, apiKey });
+  } catch (err) {
+    console.error(red(`Error: Review failed — ${err.message}`));
+    process.exit(1);
+  }
+
+  // Show the result (interactive, no action needed since we're not pushing)
+  const { status, issues, summary } = reviewResult;
+
+  if (status === 'green') {
+    console.log(green('✅ Gatekeeper: No issues found — you\'re good to push.'));
+    console.log('');
+  } else {
+    await prompt(reviewResult, { nonInteractive: false, repoRoot });
+    console.log('');
+    console.log(dim('This was a preview — no push was attempted.'));
+    console.log(dim('When you\'re ready, run: git push'));
+    console.log('');
+  }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -459,6 +540,7 @@ function printUsage() {
   console.log('');
   console.log('Usage:');
   console.log(`  ${cyan('npx gatekeeper-ai init')}    Install Gatekeeper in the current git repo`);
+  console.log(`  ${cyan('npx gatekeeper-ai check')}   Preview a review of your current changes (without pushing)`);
   console.log(`  ${cyan('npx gatekeeper-ai scan')}    Regenerate GATEKEEPER.md by rescanning the repo`);
   console.log(`  ${cyan('npx gatekeeper-ai review')}  Respond to a blocked push (opens interactive UI)`);
   console.log(`  ${cyan('npx gatekeeper-ai stats')}   Show review history for this repo`);
