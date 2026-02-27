@@ -87,7 +87,7 @@ async function handleNonInteractive(status, issues, summary, repoRoot) {
     // Yellow: warn but allow the push through
     console.log(bold(yellow(`🟡 Gatekeeper: ${count} warning${count === 1 ? '' : 's'} — push allowed`)));
     for (const issue of issues) {
-      console.log(`   ⚠️  ${issue.plain_english}`);
+      console.log(`   ⚠️  ${issue.plain_english || 'Warning detected'}`);
     }
     console.log('');
     console.log(dim(`   ${summary}`));

@@ -244,7 +244,17 @@ function readCache(repoRoot, diffHash) {
     const cache = JSON.parse(readFileSync(cachePath, 'utf8'));
     const entry = cache[diffHash];
     if (!entry) return null;
-    if (Date.now() - entry.timestamp > CACHE_TTL_MS) return null;
+    if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+      // Prune this and any other expired entries while we're here
+      let pruned = false;
+      for (const [key, e] of Object.entries(cache)) {
+        if (Date.now() - e.timestamp > CACHE_TTL_MS) { delete cache[key]; pruned = true; }
+      }
+      if (pruned) {
+        try { writeFileSync(cachePath, JSON.stringify(cache, null, 2), 'utf8'); } catch { /* ignore */ }
+      }
+      return null;
+    }
     return entry;
   } catch {
     return null;
